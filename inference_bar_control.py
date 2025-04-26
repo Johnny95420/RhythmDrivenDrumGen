@@ -19,6 +19,7 @@ from data_aug import DrumCoditionRollDataset, roll_collate_fn
 from symusic import Note, Score, Track
 from torch.utils.data import DataLoader
 from utils.model_create import get_model
+from utils.mapping import mapping
 
 
 # %%
@@ -71,6 +72,7 @@ def generate_piano_roll(max_time, np_score, np_ds_score, org_tpq, down_sample_tp
 def process_midi(
     file_path: str,
     down_sample_tpq: int = 4,
+    seq_len: int = 64,
     device: str = "cuda",
 ):
     """
@@ -110,11 +112,22 @@ def process_midi(
     )
 
     # Truncate sequence length
-    return (
-        piano_roll_onset,
-        piano_roll_vel,
-        piano_roll_timeoffset,
-    )
+    curr_seq_len = piano_roll_onset.shape[1]
+    if curr_seq_len > seq_len:
+        return slice_piano_roll(
+            piano_roll_onset,
+            piano_roll_vel,
+            piano_roll_timeoffset,
+            seq_len,
+            seq_len,
+        )
+    elif curr_seq_len < seq_len:
+        padding = torch.zeros([1, seq_len - curr_seq_len, 9]).cuda()
+        return (
+            torch.cat([piano_roll_onset, padding], dim=1),
+            torch.cat([piano_roll_vel, padding], dim=1),
+            torch.cat([piano_roll_timeoffset, padding], dim=1),
+        )
 
 
 def slice_piano_roll(
@@ -172,80 +185,80 @@ def assign_generate_paramter(density, intensity, style, inst, device):
     density = torch.tensor([[[density]]]).to(torch.float32).to(device)
     intensity = torch.tensor([[[intensity]]]).to(torch.float32).to(device)
     style = torch.tensor([[style]]).to(torch.long).to(device)
-    # kcik
-    # snare
-    # close hi hat
-    # floor tom
-    # open hi hat
-    # low mid tom
-    # crash
-    # high tom
-    # ride
+    # kcik 0
+    # snare 1
+    # close hi hat 2
+    # floor tom 3
+    # open hi hat 4
+    # low mid tom 5
+    # crash 6
+    # high tom 7
+    # ride 8
     inst = torch.tensor([[inst]]).to(torch.float32).to(device)
     return density, intensity, style, inst
 
 
 # %%
 if __name__ == "__main__":
-    processed_midi_paths = list(
-        Path("/home/groove-v1.0.0-midionly/processed_midi_file_clip").glob("**/*.mid*")
-    )
-    shuffle(processed_midi_paths)
-    l = len(processed_midi_paths)
-    val_size, test_size = int(l * 0.2), int(l * 0.1)
-    test_data, val_data, train_data = (
-        processed_midi_paths[:test_size],
-        processed_midi_paths[test_size : test_size + val_size],
-        processed_midi_paths[test_size + val_size :],
-    )
-    test_dataset = DrumCoditionRollDataset(test_data, 4)
-    test_loader = DataLoader(
-        test_dataset, batch_size=1, shuffle=True, collate_fn=roll_collate_fn
-    )
+    mapping_table = {n: idx for idx, n in enumerate(set(mapping.values()))}
+    inverse_mapping = {val: key for key, val in mapping_table.items()}
     ckpt = torch.load("/home/vae_causal_ckpt_4bar/ckpt_44500.ckpt")
     model = get_model(ckpt["config"])
     model.load_state_dict(ckpt["vae_model"])
     model.eval()
     # %%
-    test_loader = iter(test_loader)
-    inverse_mapping = {val: key for key, val in test_dataset.mapping_table.items()}
-    # %%
-    data = next(test_loader)
-    data = {key: data[key].cuda() for key in data}
-    print(data["masks"])
-    # %%
-    density_offset = torch.tensor([[[-1], [-1.3588], [-1], [2]]], device="cuda:0")
-    intensity_offset = torch.tensor([[[0], [-0.5], [-0], [2]]], device="cuda:0")
+    (
+        piano_roll_onset,
+        piano_roll_vel,
+        piano_roll_timeoffset,
+    ) = process_midi("/home/Ostinato Bass Ascending D Minor 113 bpm.mid")
+
+    masks = torch.ones([1, 64]).cuda()
+    density = torch.tensor([[[0.0], [0.0], [0.5], [1.0]]], device="cuda:0")
+    intensity = torch.tensor([[[0.0], [0.0], [0.5], [1.0]]], device="cuda:0")
+    instrument = torch.tensor(
+        [
+            [
+                [0.15, 0.0, 0.15, 0, 0.05, 0, 0, 0, 0],
+                [0.15, 0.0, 0.15, 0, 0.25, 0, 0, 0, 0.0],
+                [0.15, 0.25, 0.0, 0, 0, 0, 0, 0, 0.0],
+                [0.15, 0.15, 0.25, 0, 0, 0, 0, 0, 0.25],
+            ]
+        ],
+        device="cuda:0",
+    )
+    style = torch.tensor([[16]], device="cuda:0")
     with torch.autocast("cuda", torch.bfloat16):
         z, vae_loss = model.encode(
-            data["onset_reduce"],
-            data["vel_reduce"],
-            data["timeoffset_reduce"],
-            data["masks"],
+            piano_roll_onset,
+            piano_roll_vel,
+            piano_roll_timeoffset,
+            masks,
             16,
         )
         z = torch.repeat_interleave(z, 16, dim=1)
-        density = torch.repeat_interleave(data["density"], 16, dim=1)
-        intensity = torch.repeat_interleave(data["intensity"], 16, dim=1)
-        instrument = torch.repeat_interleave(data["instrument"], 16, dim=1)
-        style = torch.repeat_interleave(data["style"], 64, dim=1)
+        density = torch.repeat_interleave(density, 16, dim=1)
+        intensity = torch.repeat_interleave(intensity, 16, dim=1)
+        instrument = torch.repeat_interleave(instrument, 16, dim=1)
+        style = torch.repeat_interleave(style, 64, dim=1)
 
         input_ids, condition, masks = model.process_decoder_input(
-            data["onset"],
-            data["vel"],
-            data["timeoffset"],
+            torch.zeros([1, 1, 9], device="cuda"),
+            torch.zeros([1, 1, 9], device="cuda"),
+            torch.zeros([1, 1, 9], device="cuda"),
             z,
-            data["masks"],
+            masks,
             density,
             intensity,
             style,
             instrument,
         )
+        condition[3].shape
         condition_embeddings = [
             condition_layer(condition)
             for condition_layer in model.decoder.condition_adapter
         ]
-
+    # %%
     input_ids = input_ids[:, :, :1, :]
     with torch.autocast("cuda", torch.bfloat16):
         for i in range(64):
@@ -273,11 +286,4 @@ if __name__ == "__main__":
         inverse_mapping,
         "/home/test.midi",
     )
-    _ = convert_to_midi(
-        data["onset"][[idx]],
-        data["vel"][[idx]],
-        data["timeoffset"][[idx]],
-        inverse_mapping,
-        "/home/org.midi",
-    )
-# %%
+    # %%
