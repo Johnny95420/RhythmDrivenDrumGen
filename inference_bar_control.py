@@ -1,6 +1,8 @@
 # %%
 from random import seed, shuffle
 
+import numpy as np
+
 seed(42)
 import numpy as np
 
@@ -18,8 +20,8 @@ import torch.nn as nn
 from data_aug import DrumCoditionRollDataset, roll_collate_fn
 from symusic import Note, Score, Track
 from torch.utils.data import DataLoader
-from utils.model_create import get_model
 from utils.mapping import mapping
+from utils.model_create import get_model
 
 
 # %%
@@ -114,12 +116,10 @@ def process_midi(
     # Truncate sequence length
     curr_seq_len = piano_roll_onset.shape[1]
     if curr_seq_len > seq_len:
-        return slice_piano_roll(
-            piano_roll_onset,
-            piano_roll_vel,
-            piano_roll_timeoffset,
-            seq_len,
-            seq_len,
+        return (
+            piano_roll_onset[:, :seq_len],
+            piano_roll_vel[:, :seq_len],
+            piano_roll_timeoffset[:, :seq_len],
         )
     elif curr_seq_len < seq_len:
         padding = torch.zeros([1, seq_len - curr_seq_len, 9]).cuda()
@@ -161,41 +161,66 @@ def slice_piano_roll(
     return slices
 
 
-def assign_generate_paramter(density, intensity, style, inst, device):
-    # {
-    #     "reggae": 0,
-    #     "gospel": 1,
-    #     "latin": 2,
-    #     "country": 3,
-    #     "punk": 4,
-    #     "highlife": 5,
-    #     "rock": 6,
-    #     "hiphop": 7,
-    #     "pop": 8,
-    #     "middleeastern": 9,
-    #     "neworleans": 10,
-    #     "jazz": 11,
-    #     "blues": 12,
-    #     "soul": 13,
-    #     "afrocuban": 14,
-    #     "afrobeat": 14,
-    #     "dance": 15,
-    #     "funk": 16,
-    # }
-    density = torch.tensor([[[density]]]).to(torch.float32).to(device)
-    intensity = torch.tensor([[[intensity]]]).to(torch.float32).to(device)
-    style = torch.tensor([[style]]).to(torch.long).to(device)
-    # kcik 0
-    # snare 1
-    # close hi hat 2
-    # floor tom 3
-    # open hi hat 4
-    # low mid tom 5
-    # crash 6
-    # high tom 7
-    # ride 8
-    inst = torch.tensor([[inst]]).to(torch.float32).to(device)
-    return density, intensity, style, inst
+# {
+#     "reggae": 0,
+#     "gospel": 1,
+#     "latin": 2,
+#     "country": 3,
+#     "punk": 4,
+#     "highlife": 5,
+#     "rock": 6,
+#     "hiphop": 7,
+#     "pop": 8,
+#     "middleeastern": 9,
+#     "neworleans": 10,
+#     "jazz": 11,
+#     "blues": 12,
+#     "soul": 13,
+#     "afrocuban": 14,
+#     "afrobeat": 14,
+#     "dance": 15,
+#     "funk": 16,
+# }
+
+# kcik 0
+# snare 1
+# close hi hat 2
+# floor tom 3
+# open hi hat 4
+# low mid tom 5
+# crash 6
+# high tom 7
+# ride 8
+
+
+def generate_control_params(
+    control_points,
+    params,
+    seq_len,
+    interpolation_type,
+    device="cuda:0",
+    is_cat: bool = False,
+):
+    control_points = (seq_len * np.array(control_points)).astype(int)
+    params = np.array(params)
+    if params.ndim == 1:
+        params = params.reshape([-1, 1])
+    output = np.zeros([seq_len, params.shape[-1]])
+    for i in range(control_points.shape[0] - 1):
+        start = control_points[i]
+        end = control_points[i + 1]
+        if interpolation_type == "left":
+            output[start:end] = params[i]
+        elif interpolation_type == "right":
+            output[start:end] = params[i + 1]
+        elif interpolation_type == "linear":
+            output[start:end] = np.linspace(params[i], params[i + 1], end - start)
+        else:
+            raise ValueError("Only support left, right and linear ")
+    output = torch.tensor(output, device=device).unsqueeze(0)
+    if is_cat:
+        return output.to(torch.long)
+    return output
 
 
 # %%
@@ -211,24 +236,33 @@ if __name__ == "__main__":
         piano_roll_onset,
         piano_roll_vel,
         piano_roll_timeoffset,
-    ) = process_midi("/home/Ostinato Bass Ascending D Minor 113 bpm.mid")
+    ) = process_midi("/home/Vamp Upbeat Jazz Fusion D Minor 103 bpm.mid")
 
-    masks = torch.ones([1, 64]).cuda()
-    density = torch.tensor([[[0.0], [0.0], [0.5], [1.0]]], device="cuda:0")
-    intensity = torch.tensor([[[0.0], [0.0], [0.5], [1.0]]], device="cuda:0")
-    instrument = torch.tensor(
-        [
-            [
-                [0.15, 0.0, 0.15, 0, 0.05, 0, 0, 0, 0],
-                [0.15, 0.0, 0.15, 0, 0.25, 0, 0, 0, 0.0],
-                [0.15, 0.25, 0.0, 0, 0, 0, 0, 0, 0.0],
-                [0.15, 0.15, 0.25, 0, 0, 0, 0, 0, 0.25],
-            ]
-        ],
-        device="cuda:0",
+    masks = generate_control_params([0, 1], [1, 1], 64, "left", "cuda:0", True)[:, :, 0]
+    density = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1], [1, 1, 1, 2, 1], 64, "left"
     )
-    style = torch.tensor([[16]], device="cuda:0")
+    intensity = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1], [-1, -1, -1, -2, 0.0], 64, "left"
+    )
+
+    instrument = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1],
+        [
+            [0.25, 0.05, 0.5, 0, 0, 0, 0, 0, 0],
+            [0.25, 0.1, 0.5, 0, 0, 0, 0, 0, 0],
+            [0.25, 0.5, 0.5, 0, 0.1, 0, 0, 0, 0.2],
+            [0.25, 0.5, 0.5, 0, 0, 0, 0, 0, 0.2],
+            [0.25, 0.05, 0.1, 0, 0, 0, 0, 0, 0],
+        ],
+        64,
+        "left",
+    )
+    style = generate_control_params([0, 1], [2, 2], 64, "left", is_cat=True)[:, :, 0]
     with torch.autocast("cuda", torch.bfloat16):
+        density = density.to(torch.bfloat16)
+        intensity = intensity.to(torch.bfloat16)
+        instrument = instrument.to(torch.bfloat16)
         z, vae_loss = model.encode(
             piano_roll_onset,
             piano_roll_vel,
@@ -237,11 +271,6 @@ if __name__ == "__main__":
             16,
         )
         z = torch.repeat_interleave(z, 16, dim=1)
-        density = torch.repeat_interleave(density, 16, dim=1)
-        intensity = torch.repeat_interleave(intensity, 16, dim=1)
-        instrument = torch.repeat_interleave(instrument, 16, dim=1)
-        style = torch.repeat_interleave(style, 64, dim=1)
-
         input_ids, condition, masks = model.process_decoder_input(
             torch.zeros([1, 1, 9], device="cuda"),
             torch.zeros([1, 1, 9], device="cuda"),
@@ -253,14 +282,11 @@ if __name__ == "__main__":
             style,
             instrument,
         )
-        condition[3].shape
         condition_embeddings = [
             condition_layer(condition)
             for condition_layer in model.decoder.condition_adapter
         ]
-    # %%
-    input_ids = input_ids[:, :, :1, :]
-    with torch.autocast("cuda", torch.bfloat16):
+        input_ids = input_ids[:, :, :1, :]
         for i in range(64):
             output = model.decoder(
                 input_ids=input_ids, input_condition_embeddings=condition_embeddings
