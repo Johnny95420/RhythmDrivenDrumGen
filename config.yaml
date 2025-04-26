@@ -1,0 +1,68 @@
+Data:
+  data_dir: /home/groove-v1.0.0-midionly
+  raw_folder: groove
+  remapping_folder: processed_midi_file
+  slice_folder: processed_midi_file_clip
+  clip_bar: 4
+  hop_size: 1
+  down_sample_tpq: 4
+  normalize_factor:
+    density_mean: 0.1321519014490809
+    density_std: 0.03869143857589552
+    intensity_mean: 0.5639105329894186
+    intensity_std: 0.1356931531127013
+  data_split:
+    val_prop: 0.2
+    test_prop: 0.1
+  batch_size:
+    train: 64
+    val: 64
+
+Model:
+  Encoder:
+    input_dim: [9, 9, 9]
+    hidden_dim: [32, 32, 32]
+    d_model: 256
+    n_head: 8
+    n_layer: 8
+    dropout_vel: 0.1
+    dropout_time: 0.1
+    emb_dropout: 0.1
+    att_dropout: 0.1
+    max_len: 128
+
+  Intermediate:
+    hidden_size: 128
+    free_bits: 0.25
+
+  Decoder:
+    token_input_size: [9, 9, 9]
+    token_hidden_size: [32, 32, 32]
+    vel_dropout: 0.2
+    time_dropout: 0.2
+    condition_params:
+      - [1, "val", 1]
+      - [1, "val", 1]
+      - [17, "cat", 32]
+      - [9, "val", 32]
+      - [128, "val", 64]
+    hidden_size: 384
+    num_hidden_layers: 8
+    num_attention_heads: 8
+    embd_pdrop: 0.1
+    attention_dropout: 0.1
+
+  Output:
+    size: 9
+
+Training:
+  weight_decay: 0.02
+  learning_rate: 1e-4
+  training_steps: 45000
+  warmup_steps: 5000
+  VAE_params:
+    start_step: 10000
+    start: 0.1
+    end: 1
+    n_cycle: 7
+    ratio: 0.6
