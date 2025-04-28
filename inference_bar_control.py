@@ -1,30 +1,46 @@
 # %%
-from random import seed, shuffle
-
-import numpy as np
-
-seed(42)
-import numpy as np
-
-np.random.seed(42)
-import torch
-
-torch.manual_seed(42)
-from pathlib import Path
-from random import shuffle
-
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from data_aug import DrumCoditionRollDataset, roll_collate_fn
 from symusic import Note, Score, Track
-from torch.utils.data import DataLoader
 from utils.mapping import mapping
 from utils.model_create import get_model
 
 
 # %%
+
+# {
+#     "reggae": 0,
+#     "gospel": 1,
+#     "latin": 2,
+#     "country": 3,
+#     "punk": 4,
+#     "highlife": 5,
+#     "rock": 6,
+#     "hiphop": 7,
+#     "pop": 8,
+#     "middleeastern": 9,
+#     "neworleans": 10,
+#     "jazz": 11,
+#     "blues": 12,
+#     "soul": 13,
+#     "afrocuban": 14,
+#     "afrobeat": 14,
+#     "dance": 15,
+#     "funk": 16,
+# }
+
+# kcik 0
+# snare 1
+# close hi hat 2
+# floor tom 3
+# open hi hat 4
+# low mid tom 5
+# crash 6
+# high tom 7
+# ride 8
+
+
 def convert_to_midi(onset, vel, timeoffset, inverse_mapping, path):
     np_score = {"time": [], "duration": [], "pitch": [], "velocity": []}
     size = onset.shape[1]
@@ -161,37 +177,6 @@ def slice_piano_roll(
     return slices
 
 
-# {
-#     "reggae": 0,
-#     "gospel": 1,
-#     "latin": 2,
-#     "country": 3,
-#     "punk": 4,
-#     "highlife": 5,
-#     "rock": 6,
-#     "hiphop": 7,
-#     "pop": 8,
-#     "middleeastern": 9,
-#     "neworleans": 10,
-#     "jazz": 11,
-#     "blues": 12,
-#     "soul": 13,
-#     "afrocuban": 14,
-#     "afrobeat": 14,
-#     "dance": 15,
-#     "funk": 16,
-# }
-
-# kcik 0
-# snare 1
-# close hi hat 2
-# floor tom 3
-# open hi hat 4
-# low mid tom 5
-# crash 6
-# high tom 7
-# ride 8
-
 
 def generate_control_params(
     control_points,
@@ -222,48 +207,31 @@ def generate_control_params(
         return output.to(torch.long)
     return output
 
-
-# %%
-if __name__ == "__main__":
-    mapping_table = {n: idx for idx, n in enumerate(set(mapping.values()))}
-    inverse_mapping = {val: key for key, val in mapping_table.items()}
-    ckpt = torch.load("/home/vae_causal_ckpt_4bar/ckpt_44500.ckpt")
-    model = get_model(ckpt["config"])
-    model.load_state_dict(ckpt["vae_model"])
-    model.eval()
-    # %%
-    (
-        piano_roll_onset,
-        piano_roll_vel,
-        piano_roll_timeoffset,
-    ) = process_midi("/home/Vamp Upbeat Jazz Fusion D Minor 103 bpm.mid")
-
-    masks = generate_control_params([0, 1], [1, 1], 64, "left", "cuda:0", True)[:, :, 0]
-    density = generate_control_params(
-        [0, 0.25, 0.5, 0.75, 1], [1, 1, 1, 2, 1], 64, "left"
-    )
-    intensity = generate_control_params(
-        [0, 0.25, 0.5, 0.75, 1], [-1, -1, -1, -2, 0.0], 64, "left"
-    )
-
-    instrument = generate_control_params(
-        [0, 0.25, 0.5, 0.75, 1],
-        [
-            [0.25, 0.05, 0.5, 0, 0, 0, 0, 0, 0],
-            [0.25, 0.1, 0.5, 0, 0, 0, 0, 0, 0],
-            [0.25, 0.5, 0.5, 0, 0.1, 0, 0, 0, 0.2],
-            [0.25, 0.5, 0.5, 0, 0, 0, 0, 0, 0.2],
-            [0.25, 0.05, 0.1, 0, 0, 0, 0, 0, 0],
-        ],
-        64,
-        "left",
-    )
-    style = generate_control_params([0, 1], [2, 2], 64, "left", is_cat=True)[:, :, 0]
-    with torch.autocast("cuda", torch.bfloat16):
-        density = density.to(torch.bfloat16)
-        intensity = intensity.to(torch.bfloat16)
-        instrument = instrument.to(torch.bfloat16)
-        z, vae_loss = model.encode(
+def generate(piano_roll_onset,
+             piano_roll_vel,
+             piano_roll_timeoffset,
+             density,
+             intensity,
+             instrument,
+             style,
+             masks,
+             generate_seq_len):
+    
+    if piano_roll_onset.size(1)>128:
+        raise ValueError("The input sequence length must be less than or equal to 128.")
+    
+    if generate_seq_len % 4!=0:
+        raise ValueError("The generated sequence length needs to be a multiple of 4.")
+    
+    if generate_seq_len > density.size(1):
+        raise ValueError("The length of control parameters must be grater or equal to the generated sequence length")
+        
+    density = density.to(torch.bfloat16)
+    intensity = intensity.to(torch.bfloat16)
+    instrument = instrument.to(torch.bfloat16)
+    
+    with torch.autocast("cuda", torch.bfloat16):    
+        z, _ = model.encode(
             piano_roll_onset,
             piano_roll_vel,
             piano_roll_timeoffset,
@@ -287,7 +255,7 @@ if __name__ == "__main__":
             for condition_layer in model.decoder.condition_adapter
         ]
         input_ids = input_ids[:, :, :1, :]
-        for i in range(64):
+        for i in range(generate_seq_len):
             output = model.decoder(
                 input_ids=input_ids, input_condition_embeddings=condition_embeddings
             )
@@ -303,12 +271,58 @@ if __name__ == "__main__":
             )
             input_ids = torch.cat([input_ids, new_input], dim=2)
 
-    onset, vel, time = input_ids[:, 0, 1:], input_ids[:, 1, 1:], input_ids[:, 2, 1:]
+        onset, vel, time = input_ids[:, 0, 1:], input_ids[:, 1, 1:], input_ids[:, 2, 1:]
+    return onset, vel, time
+# %%
+if __name__ == "__main__":
+    mapping_table = {n: idx for idx, n in enumerate(set(mapping.values()))}
+    inverse_mapping = {val: key for key, val in mapping_table.items()}
+    ckpt = torch.load("/home/vae_causal_ckpt_4bar/ckpt_44500.ckpt")
+    model = get_model(ckpt["config"])
+    model.load_state_dict(ckpt["vae_model"])
+    model.eval()
+    
+    (
+        piano_roll_onset,
+        piano_roll_vel,
+        piano_roll_timeoffset,
+    ) = process_midi("/home/Vamp Upbeat Jazz Fusion D Minor 103 bpm.mid")
+
+    masks = generate_control_params([0, 1], [1, 1], 64, "left", "cuda:0", True)[:, :, 0]
+    density = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1], [-2, 1, 1, 2, 1], 64, "left"
+    )
+    intensity = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1], [5, -1, -1, -2, 0.0], 64, "left"
+    )
+
+    instrument = generate_control_params(
+        [0, 0.25, 0.5, 0.75, 1],
+        [
+            [0.25, -1.0, 0.0, 0, 0, 0, 0, 0, 0],
+            [0.25, 0.1, 0.5, 0, 0, 0, 0, 0, 0],
+            [0.25, 0.5, 0.5, 0, 0.1, 0, 0, 0, 0.2],
+            [0.25, 0.5, 0.5, 0, 0, 0, 0, 0, 0.2],
+            [0.25, 0.05, 0.1, 0, 0, 0, 0, 0, 0],
+        ],
+        64,
+        "left",
+    )
+    style = generate_control_params([0, 1], [2, 2], 64, "left", is_cat=True)[:, :, 0]
+    onset, vel, time = generate(piano_roll_onset,
+                                piano_roll_vel,
+                                piano_roll_timeoffset,
+                                density,
+                                intensity,
+                                instrument,
+                                style,
+                                masks,
+                                64)
     idx = 0
     np_score = convert_to_midi(
-        onset[:, :, :],
-        vel[[idx]],
-        time[[idx]],
+        onset,
+        vel,
+        time,
         inverse_mapping,
         "/home/test.midi",
     )
